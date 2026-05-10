@@ -35,9 +35,7 @@ class LuckMailClient:
     async def create_order(self, email_type: str = "self_built") -> Optional[dict]:
         """Allocate a temporary email and create a code-receive order."""
         path = "/api/v1/openapi/order/create"
-        payload: dict = {"email_type": email_type}
-        if self.project_code:
-            payload["project_code"] = self.project_code
+        payload: dict = {"email_type": email_type, "project_code": self.project_code}
         try:
             async with httpx.AsyncClient(timeout=30) as c:
                 r = await c.post(
