@@ -135,6 +135,9 @@ class AccountScheduler:
             logger.info("[Scheduler] Pool adequately stocked ✅")
 
     async def _create_accounts(self, count: int):
+        if not self.proxy:
+            logger.error("[Scheduler] ❌ PROXY não configurado — criação de contas abortada por segurança!")
+            return
         logger.info(f"[Scheduler] Creating {count} account(s)...")
         success = 0
         for i in range(count):
