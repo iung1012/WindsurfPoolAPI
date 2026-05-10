@@ -1,23 +1,17 @@
 """
 LuckMail API client — Mode A (code receive, pay-per-success).
 
+Auth: single header X-API-Key — no HMAC, no timestamp, no signature.
+
 Flow:
   1. create_order() → allocates an email + order_no
   2. poll_code(order_no) → polls until code arrives or timeout
-  3. cancel_order(order_no) → cancels if unused
-
-Auth: single API key used as both identifier and HMAC-SHA256 signing secret.
-  X-API-Key: {api_key}
-  X-Timestamp: {unix_timestamp}
-  X-Signature: HMAC-SHA256(api_key, METHOD + path + timestamp + body)
+  3. cancel_order(order_no) → cancels if unused (no charge)
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
-import time
 from typing import Optional
 
 import httpx
@@ -28,35 +22,29 @@ BASE_URL = "https://mails.luckyous.com"
 
 
 class LuckMailClient:
-    def __init__(self, api_key: str, project_code: str = ""):
+    def __init__(self, api_key: str, project_code: str = "windsurf"):
         self.api_key = api_key
         self.project_code = project_code
 
-    def _headers(self, method: str, path: str, body: str = "") -> dict:
-        ts = int(time.time())
-        msg = method.upper() + path + str(ts) + body
-        sig = hmac.new(
-            self.api_key.encode("utf-8"),
-            msg.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+    def _headers(self) -> dict:
         return {
             "X-API-Key": self.api_key,
-            "X-Timestamp": str(ts),
-            "X-Signature": sig,
             "Content-Type": "application/json",
         }
 
-    async def create_order(self, email_type: str = "ms_graph") -> Optional[dict]:
+    async def create_order(self, email_type: str = "self_built") -> Optional[dict]:
         """Allocate a temporary email and create a code-receive order."""
         path = "/api/v1/openapi/order/create"
         payload: dict = {"email_type": email_type}
         if self.project_code:
             payload["project_code"] = self.project_code
-        body = json.dumps(payload)
         try:
             async with httpx.AsyncClient(timeout=30) as c:
-                r = await c.post(f"{BASE_URL}{path}", content=body, headers=self._headers("POST", path, body))
+                r = await c.post(
+                    f"{BASE_URL}{path}",
+                    content=json.dumps(payload),
+                    headers=self._headers(),
+                )
                 data = r.json()
             if data.get("code") == 0:
                 d = data["data"]
@@ -80,7 +68,7 @@ class LuckMailClient:
             await asyncio.sleep(interval)
             try:
                 async with httpx.AsyncClient(timeout=15) as c:
-                    r = await c.get(f"{BASE_URL}{path}", headers=self._headers("GET", path))
+                    r = await c.get(f"{BASE_URL}{path}", headers=self._headers())
                     data = r.json()
                 if data.get("code") == 0:
                     od = data["data"]
@@ -106,7 +94,7 @@ class LuckMailClient:
         path = f"/api/v1/openapi/order/{order_no}/cancel"
         try:
             async with httpx.AsyncClient(timeout=10) as c:
-                await c.post(f"{BASE_URL}{path}", headers=self._headers("POST", path))
+                await c.post(f"{BASE_URL}{path}", headers=self._headers())
             logger.info(f"[LuckMail] Cancelled {order_no}")
         except Exception as e:
             logger.warning(f"[LuckMail] cancel error: {e}")
@@ -115,7 +103,7 @@ class LuckMailClient:
         path = "/api/v1/openapi/balance"
         try:
             async with httpx.AsyncClient(timeout=10) as c:
-                r = await c.get(f"{BASE_URL}{path}", headers=self._headers("GET", path))
+                r = await c.get(f"{BASE_URL}{path}", headers=self._headers())
                 data = r.json()
             if data.get("code") == 0:
                 return float(data["data"].get("balance", 0))
@@ -124,14 +112,13 @@ class LuckMailClient:
         return None
 
     async def list_projects(self) -> list:
-        """List available projects (to find your Windsurf project_code)."""
         path = "/api/v1/openapi/projects"
         try:
             async with httpx.AsyncClient(timeout=10) as c:
-                r = await c.get(f"{BASE_URL}{path}", headers=self._headers("GET", path))
+                r = await c.get(f"{BASE_URL}{path}", headers=self._headers())
                 data = r.json()
             if data.get("code") == 0:
-                return data.get("data", {}).get("list", data.get("data", []))
+                return data.get("data", {}).get("list", [])
         except Exception as e:
             logger.warning(f"[LuckMail] list_projects error: {e}")
         return []
