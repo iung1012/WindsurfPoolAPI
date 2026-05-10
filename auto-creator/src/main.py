@@ -45,7 +45,6 @@ async def main():
 
     required = [
         "LUCKMAIL_API_KEY",
-        "LUCKMAIL_API_SECRET",
         "LUCKMAIL_PROJECT_CODE",
         "POOL_URL",
     ]
@@ -60,7 +59,6 @@ async def main():
 
     luckmail = LuckMailClient(
         api_key=os.environ["LUCKMAIL_API_KEY"],
-        api_secret=os.environ["LUCKMAIL_API_SECRET"],
         project_code=os.environ["LUCKMAIL_PROJECT_CODE"],
     )
     pool = WindsurfPoolClient(

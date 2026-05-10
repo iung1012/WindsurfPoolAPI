@@ -6,10 +6,10 @@ Flow:
   2. poll_code(order_no) → polls until code arrives or timeout
   3. cancel_order(order_no) → cancels if unused
 
-Auth: API Key + HMAC-SHA256 signature
+Auth: single API key used as both identifier and HMAC-SHA256 signing secret.
   X-API-Key: {api_key}
   X-Timestamp: {unix_timestamp}
-  X-Signature: HMAC-SHA256(api_secret, METHOD + path + timestamp + body)
+  X-Signature: HMAC-SHA256(api_key, METHOD + path + timestamp + body)
 """
 
 import asyncio
@@ -28,16 +28,15 @@ BASE_URL = "https://mails.luckyous.com"
 
 
 class LuckMailClient:
-    def __init__(self, api_key: str, api_secret: str, project_code: str):
+    def __init__(self, api_key: str, project_code: str):
         self.api_key = api_key
-        self.api_secret = api_secret
         self.project_code = project_code
 
     def _headers(self, method: str, path: str, body: str = "") -> dict:
         ts = int(time.time())
         msg = method.upper() + path + str(ts) + body
         sig = hmac.new(
-            self.api_secret.encode("utf-8"),
+            self.api_key.encode("utf-8"),
             msg.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
