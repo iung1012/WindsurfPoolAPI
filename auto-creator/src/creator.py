@@ -88,7 +88,11 @@ async def create_one_account(
         playwright = await async_playwright().start()
         launch_kwargs: dict = {"headless": headless}
         if proxy:
-            launch_kwargs["proxy"] = _parse_proxy(proxy)
+            parsed = _parse_proxy(proxy)
+            launch_kwargs["proxy"] = parsed
+            logger.info(f"[Creator] Usando proxy: {parsed['server']}")
+        else:
+            logger.warning("[Creator] Sem proxy — IP do Railway será usado!")
 
         browser = await playwright.chromium.launch(**launch_kwargs)
         ctx = await browser.new_context(
