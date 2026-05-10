@@ -28,7 +28,7 @@ BASE_URL = "https://mails.luckyous.com"
 
 
 class LuckMailClient:
-    def __init__(self, api_key: str, project_code: str):
+    def __init__(self, api_key: str, project_code: str = ""):
         self.api_key = api_key
         self.project_code = project_code
 
@@ -50,7 +50,9 @@ class LuckMailClient:
     async def create_order(self, email_type: str = "ms_graph") -> Optional[dict]:
         """Allocate a temporary email and create a code-receive order."""
         path = "/api/v1/openapi/order/create"
-        payload = {"project_code": self.project_code, "email_type": email_type}
+        payload: dict = {"email_type": email_type}
+        if self.project_code:
+            payload["project_code"] = self.project_code
         body = json.dumps(payload)
         try:
             async with httpx.AsyncClient(timeout=30) as c:

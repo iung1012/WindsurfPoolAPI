@@ -45,21 +45,16 @@ async def main():
 
     required = [
         "LUCKMAIL_API_KEY",
-        "LUCKMAIL_PROJECT_CODE",
         "POOL_URL",
     ]
     missing = [k for k in required if not os.getenv(k)]
     if missing:
         logger.error(f"Missing required environment variables: {missing}")
-        logger.error(
-            "Tip: set LUCKMAIL_PROJECT_CODE by calling GET /api/v1/openapi/projects "
-            "on mails.luckyous.com to find the Windsurf project code."
-        )
         sys.exit(1)
 
     luckmail = LuckMailClient(
         api_key=os.environ["LUCKMAIL_API_KEY"],
-        project_code=os.environ["LUCKMAIL_PROJECT_CODE"],
+        project_code=os.getenv("LUCKMAIL_PROJECT_CODE", ""),
     )
     pool = WindsurfPoolClient(
         url=os.environ["POOL_URL"],
