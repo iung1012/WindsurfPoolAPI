@@ -1,17 +1,12 @@
 """
 Windsurf Auto-Creator — entry point.
 
-Reads config from environment variables, validates them, then starts the
-scheduler loop that monitors the WindsurfPoolAPI and auto-creates accounts.
-
 Required env vars:
-  LUCKMAIL_API_KEY        — your LuckMail API key
-  LUCKMAIL_API_SECRET     — your LuckMail API secret
-  LUCKMAIL_PROJECT_CODE   — project code on LuckMail for Windsurf emails
-  POOL_URL                — e.g. https://windsurfpoolapi-production.up.railway.app
+  POOL_URL   — e.g. https://windsurfpoolapi-production.up.railway.app
 
 Optional:
   PROXY                   — e.g. http://user:pass@host:port
+  POOL_DASHBOARD_PASSWORD — dashboard password for pool API
   QUOTA_PER_ACCOUNT       — weekly request quota per free Windsurf account (default: 40)
   REQUESTS_PER_HOUR       — initial estimate for request rate (default: 5.0)
   BUFFER_FACTOR           — safety margin, 0.25 = 25% buffer (default: 0.25)
@@ -39,29 +34,18 @@ logger = logging.getLogger("main")
 
 
 async def main():
-    from luckmail import LuckMailClient
     from pool import WindsurfPoolClient
     from scheduler import AccountScheduler
 
-    required = [
-        "LUCKMAIL_API_KEY",
-        "POOL_URL",
-    ]
-    missing = [k for k in required if not os.getenv(k)]
-    if missing:
-        logger.error(f"Missing required environment variables: {missing}")
+    if not os.getenv("POOL_URL"):
+        logger.error("Missing required environment variable: POOL_URL")
         sys.exit(1)
 
-    luckmail = LuckMailClient(
-        api_key=os.environ["LUCKMAIL_API_KEY"],
-        project_code=os.getenv("LUCKMAIL_PROJECT_CODE", "windsurf"),
-    )
     pool = WindsurfPoolClient(
         url=os.environ["POOL_URL"],
         dashboard_password=os.getenv("POOL_DASHBOARD_PASSWORD", ""),
     )
 
-    # Startup checks
     logger.info(f"[Main] Connecting to pool: {os.environ['POOL_URL']}")
     health = await pool.get_health()
     if health.get("status") == "ok":
@@ -70,24 +54,15 @@ async def main():
     else:
         logger.warning(f"[Main] Pool health check returned: {health}")
 
-    balance = await luckmail.check_balance()
-    if balance is not None:
-        logger.info(f"[Main] LuckMail balance: {balance}")
-        if balance < 1.0:
-            logger.warning("[Main] ⚠️  LuckMail balance is LOW — please top up!")
+    proxy = os.getenv("PROXY")
+    if proxy:
+        logger.info(f"[Main] Proxy configurado: {proxy[:40]}...")
     else:
-        logger.warning("[Main] Could not check LuckMail balance (check API credentials)")
-
-    # List projects to help user confirm the right project_code
-    projects = await luckmail.list_projects()
-    if projects:
-        codes = [p.get("code") or p.get("project_code", "?") for p in projects]
-        logger.info(f"[Main] Available LuckMail projects: {codes}")
+        logger.warning("[Main] PROXY nao configurado — criacao de contas sera bloqueada!")
 
     scheduler = AccountScheduler(
         pool=pool,
-        luckmail=luckmail,
-        proxy=os.getenv("PROXY"),
+        proxy=proxy,
         quota_per_account=int(os.getenv("QUOTA_PER_ACCOUNT", "40")),
         requests_per_hour=float(os.getenv("REQUESTS_PER_HOUR", "5.0")),
         buffer_factor=float(os.getenv("BUFFER_FACTOR", "0.25")),

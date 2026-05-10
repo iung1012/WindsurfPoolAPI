@@ -1,23 +1,28 @@
 """
-Windsurf account creator using Playwright + LuckMail for email verification.
+Windsurf account creator using Playwright + Guerrilla Mail for email verification.
 """
 
 import asyncio
 import logging
 import random
+import re
 import string
+import time
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
+import requests
 from playwright.async_api import async_playwright
-
-from luckmail import LuckMailClient
 
 logger = logging.getLogger(__name__)
 
 REGISTER_URL = "https://windsurf.com/account/register"
 
+
+# =============================================================================
+# Helpers
+# =============================================================================
 
 def _rand_str(n: int, chars: str = string.ascii_lowercase) -> str:
     return "".join(random.choices(chars, k=n))
@@ -55,46 +60,119 @@ def _parse_proxy(proxy_str: str) -> dict:
 
 
 async def _check_ip(proxy: Optional[str] = None) -> str:
-    """Returns the public IP seen by the outside world (via proxy if set)."""
     try:
-        proxies = None
+        kwargs: dict = {"timeout": 10}
         if proxy:
-            proxies = {"http://": proxy, "https://": proxy}
-        async with httpx.AsyncClient(proxies=proxies, timeout=10) as c:
+            kwargs["proxy"] = proxy
+        async with httpx.AsyncClient(**kwargs) as c:
             r = await c.get("https://api.ipify.org")
             return r.text.strip()
     except Exception as e:
         return f"erro: {e}"
 
 
+# =============================================================================
+# Guerrilla Mail client (synchronous — run in thread)
+# =============================================================================
+
+class GuerrillaMailClient:
+    BASE_URL = "https://api.guerrillamail.com/ajax.php"
+
+    def __init__(self):
+        self.session_token: Optional[str] = None
+        self.email_address: Optional[str] = None
+
+    def get_email_address(self) -> str:
+        response = requests.get(self.BASE_URL, params={"f": "get_email_address"}, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        self.session_token = data.get("sid_token")
+        self.email_address = data.get("email_addr")
+        logger.info(f"[Guerrilla] Email temporario: {self.email_address}")
+        return self.email_address
+
+    def get_verification_code(self, max_attempts: int = 40, poll_interval: int = 5) -> Optional[str]:
+        if not self.session_token:
+            raise ValueError("Session token nao definido")
+
+        for attempt in range(max_attempts):
+            try:
+                response = requests.get(
+                    self.BASE_URL,
+                    params={"f": "check_email", "seq": "0", "sid_token": self.session_token},
+                    timeout=10,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                count = 0
+                try:
+                    count = int(data.get("count", 0))
+                except (ValueError, TypeError):
+                    count = 0
+
+                if count > 0:
+                    emails = data.get("list", [])
+                    for em in emails:
+                        mail_id = em.get("mail_id")
+                        mail_from = em.get("mail_from", "").lower()
+                        if mail_from and "windsurf" not in mail_from and "codeium" not in mail_from:
+                            continue
+                        try:
+                            fetch_resp = requests.get(
+                                self.BASE_URL,
+                                params={"f": "fetch_email", "email_id": mail_id, "sid_token": self.session_token},
+                                timeout=10,
+                            )
+                            fetch_resp.raise_for_status()
+                            body = fetch_resp.json().get("mail_body", "")
+                            match = re.search(r"\b(\d{6})\b", body)
+                            if match:
+                                code = match.group(1)
+                                logger.info(f"[Guerrilla] Codigo encontrado: {code}")
+                                return code
+                        except Exception as e:
+                            logger.warning(f"[Guerrilla] Falha ao ler corpo do email {mail_id}: {e}")
+
+                logger.info(f"[Guerrilla] Aguardando email... ({attempt + 1}/{max_attempts})")
+            except Exception as e:
+                logger.warning(f"[Guerrilla] Erro tentativa {attempt + 1}: {e}")
+
+            time.sleep(poll_interval)
+
+        logger.error(f"[Guerrilla] Codigo nao encontrado apos {max_attempts} tentativas.")
+        return None
+
+
+# =============================================================================
+# Account creator
+# =============================================================================
+
 async def create_one_account(
-    luckmail: LuckMailClient,
     proxy: Optional[str] = None,
     headless: bool = True,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
-    Create one Windsurf account.
+    Create one Windsurf account using Guerrilla Mail.
     Returns (email, ott_token) on success, or (None, None) on failure.
     """
-    # ── 0. Verificar IP real (proxy ou direto) ───────────────────────
     ip = await _check_ip(proxy)
     if proxy:
         logger.info(f"[Creator] Proxy ativo — IP externo: {ip}")
     else:
-        logger.warning(f"[Creator] SEM PROXY — IP direto do Railway: {ip}")
+        logger.warning(f"[Creator] SEM PROXY — IP direto: {ip}")
 
-    # ── 1. Allocate email via LuckMail ──────────────────────────────────
-    order = await luckmail.create_order()
-    if not order:
-        logger.error("[Creator] Falha ao criar pedido LuckMail")
+    guerrilla = GuerrillaMailClient()
+    try:
+        email = await asyncio.to_thread(guerrilla.get_email_address)
+    except Exception as e:
+        logger.error(f"[Creator] Falha ao obter email Guerrilla: {e}")
         return None, None
 
-    email = order["email_address"]
-    order_no = order["order_no"]
     password = _strong_password()
     first_name = "User" + _rand_str(4).capitalize()
     last_name = "Acc" + _rand_str(5).capitalize()
-    logger.info(f"[Creator] Email alocado: {email} | Pedido: {order_no}")
+    logger.info(f"[Creator] Email alocado: {email}")
 
     playwright = None
     browser = None
@@ -102,9 +180,8 @@ async def create_one_account(
         playwright = await async_playwright().start()
         launch_kwargs: dict = {"headless": headless}
         if proxy:
-            parsed = _parse_proxy(proxy)
-            launch_kwargs["proxy"] = parsed
-            logger.info(f"[Creator] Playwright proxy: {parsed['server']}")
+            launch_kwargs["proxy"] = _parse_proxy(proxy)
+            logger.info(f"[Creator] Playwright proxy: {launch_kwargs['proxy']['server']}")
 
         browser = await playwright.chromium.launch(**launch_kwargs)
         ctx = await browser.new_context(
@@ -116,43 +193,38 @@ async def create_one_account(
         )
         page = await ctx.new_page()
 
-        # ── 2. Abrir página de registro ──────────────────────────────────
+        # 1. Open register page
         logger.info(f"[Creator] Abrindo {REGISTER_URL}...")
         await page.goto(REGISTER_URL, wait_until="domcontentloaded", timeout=60_000)
-        logger.info(f"[Creator] Página carregada — URL: {page.url} | Título: {await page.title()}")
+        logger.info(f"[Creator] Pagina carregada — URL: {page.url} | Titulo: {await page.title()}")
 
         try:
             await page.wait_for_selector('input[placeholder="Your first name"]', state="visible", timeout=20_000)
         except Exception:
             body = await page.inner_text("body")
-            logger.error(f"[Creator] Campo 'First name' não encontrado. Corpo: {body[:300]}")
-            await luckmail.cancel_order(order_no)
+            logger.error(f"[Creator] Campo 'First name' nao encontrado. Corpo: {body[:300]}")
             return None, None
 
-        logger.info(f"[Creator] Preenchendo: nome={first_name} sobrenome={last_name} email={email}")
+        # 2. Fill form
+        logger.info(f"[Creator] Preenchendo: nome={first_name} email={email}")
         await page.fill('input[placeholder="Your first name"]', first_name)
         await page.fill('input[placeholder="Your last name"]', last_name)
         await page.fill('input[placeholder="you@example.com"]', email)
-
-        tos = page.locator('input[type="checkbox"]').first
-        await tos.check(force=True)
-        logger.info("[Creator] TOS marcado — clicando Continue...")
+        await page.locator('input[type="checkbox"]').first.check(force=True)
         await page.click('button:has-text("Continue")')
 
-        # ── 3. Tela de senha ─────────────────────────────────────────────
+        # 3. Password screen
         try:
             await page.wait_for_selector('input[type="password"]', timeout=30_000)
             logger.info(f"[Creator] Tela de senha apareceu — URL: {page.url}")
         except Exception:
             body = await page.inner_text("body")
-            logger.error(f"[Creator] Tela de senha NÃO apareceu. URL: {page.url} | Corpo: {body[:300]}")
-            await luckmail.cancel_order(order_no)
+            logger.error(f"[Creator] Tela de senha NAO apareceu. URL: {page.url} | Corpo: {body[:300]}")
             return None, None
 
         body_text = await page.inner_text("body")
         if "Welcome back" in body_text or "Enter your password for" in body_text:
-            logger.warning(f"[Creator] Email já cadastrado: {email}")
-            await luckmail.cancel_order(order_no)
+            logger.warning(f"[Creator] Email ja cadastrado: {email}")
             return None, None
 
         for inp in await page.query_selector_all('input[type="password"]'):
@@ -160,37 +232,34 @@ async def create_one_account(
         logger.info("[Creator] Senha preenchida — clicando Continue...")
         await page.click('button:has-text("Continue")')
 
-        # ── 4. Aguardar tela de verificação ──────────────────────────────
+        # 4. Wait for "Check your inbox"
         try:
             await page.wait_for_selector("text=Check your inbox", timeout=30_000)
-            logger.info(f"[Creator] ✅ 'Check your inbox' encontrado — URL: {page.url}")
-            body_text = await page.inner_text("body")
-            logger.info(f"[Creator] Corpo da tela de verificação: {body_text[:200]}")
+            logger.info(f"[Creator] 'Check your inbox' encontrado — URL: {page.url}")
         except Exception:
             body_text = await page.inner_text("body")
-            logger.error(f"[Creator] Tela 'Check your inbox' NÃO encontrada — URL: {page.url}")
+            logger.error(f"[Creator] Tela 'Check your inbox' NAO encontrada — URL: {page.url}")
             logger.error(f"[Creator] Corpo atual: {body_text[:400]}")
             if "too many" in body_text.lower() or "rate" in body_text.lower():
-                logger.error("[Creator] ⚠️  Rate limited pelo Windsurf!")
-            await luckmail.cancel_order(order_no)
+                logger.error("[Creator] Rate limited pelo Windsurf!")
             return None, None
 
-        # ── 5. Poll LuckMail pelo código ─────────────────────────────────
-        logger.info(f"[Creator] Aguardando código LuckMail (pedido {order_no}, até 5min)...")
-        code = await luckmail.poll_code(order_no, max_attempts=60, interval=5)
+        # 5. Poll Guerrilla Mail for code (runs in thread so it doesn't block event loop)
+        logger.info(f"[Creator] Aguardando codigo Guerrilla Mail (ate 3min30s)...")
+        code = await asyncio.to_thread(guerrilla.get_verification_code, 40, 5)
+
         if not code:
-            logger.error(f"[Creator] ❌ Código não chegou para {email} após 5min")
+            logger.error(f"[Creator] Codigo nao chegou para {email}")
             return None, None
 
-        # ── 6. Inserir código ────────────────────────────────────────────
-        logger.info(f"[Creator] Código recebido: {code} — inserindo...")
-
+        # 6. Enter code
+        logger.info(f"[Creator] Codigo recebido: {code} — inserindo...")
         code_inputs = (
             await page.query_selector_all('input[inputmode="numeric"]')
             or await page.query_selector_all('input[autocomplete="one-time-code"]')
             or await page.query_selector_all('input[type="text"]')
         )
-        logger.info(f"[Creator] Inputs de código encontrados: {len(code_inputs)}")
+        logger.info(f"[Creator] Inputs de codigo encontrados: {len(code_inputs)}")
 
         if len(code_inputs) >= 6:
             for i, digit in enumerate(code[:6]):
@@ -200,7 +269,7 @@ async def create_one_account(
         elif len(code_inputs) == 1:
             await code_inputs[0].fill(code)
         else:
-            logger.warning("[Creator] Sem inputs específicos — digitando via teclado")
+            logger.warning("[Creator] Sem inputs especificos — digitando via teclado")
             for digit in code:
                 await page.keyboard.type(digit, delay=80)
 
@@ -209,39 +278,27 @@ async def create_one_account(
             'button:has-text("Verify"), '
             'button:has-text("Submit")'
         )
-        n_submit = await submit.count()
-        logger.info(f"[Creator] Botões de submit encontrados: {n_submit}")
-        if n_submit > 0:
+        if await submit.count() > 0:
             await submit.first.click(force=True)
         else:
             await page.keyboard.press("Enter")
 
-        # ── 7. Aguardar redirect de sucesso ──────────────────────────────
-        account_ok = False
-        for attempt in range(20):
-            await asyncio.sleep(2)
-            url = page.url
-            text = await page.inner_text("body")
-            logger.debug(f"[Creator] Aguardando redirect ({attempt+1}/20) — URL: {url}")
-            if "/register" not in url and "/login" not in url:
-                account_ok = True
-                logger.info(f"[Creator] ✅ Redirect para: {url}")
-                break
-            if any(w in text.lower() for w in ["welcome", "dashboard", "download", "workspace", "getting started"]):
-                account_ok = True
-                logger.info(f"[Creator] ✅ Texto de sucesso detectado na página")
-                break
-
-        if not account_ok:
+        # 7. Wait for success redirect (URL must leave /register and /login)
+        try:
+            await page.wait_for_url(
+                lambda url: "/register" not in url and "/login" not in url,
+                timeout=40_000,
+            )
+            logger.info(f"[Creator] Redirect confirmado para: {page.url}")
+        except Exception:
             body_text = await page.inner_text("body")
-            logger.error(f"[Creator] ❌ Conta não confirmada. URL: {page.url}")
+            logger.error(f"[Creator] Conta nao confirmada — sem redirect. URL: {page.url}")
             logger.error(f"[Creator] Corpo: {body_text[:300]}")
             return None, None
 
-        # ── 8. Capturar token ott$ ────────────────────────────────────────
+        # 8. Capture ott$ token
         logger.info("[Creator] Navegando para /show-auth-token...")
-        await page.goto("https://windsurf.com/show-auth-token", wait_until="networkidle", timeout=20_000)
-        logger.info(f"[Creator] Token page URL: {page.url} | Título: {await page.title()}")
+        await page.goto("https://windsurf.com/show-auth-token", wait_until="domcontentloaded", timeout=30_000)
 
         token: Optional[str] = await page.evaluate("""() => new Promise(resolve => {
             const find = () => {
@@ -267,10 +324,10 @@ async def create_one_account(
 
         if not token:
             body_text = await page.inner_text("body")
-            logger.error(f"[Creator] ott$ token não encontrado. Corpo: {body_text[:300]}")
+            logger.error(f"[Creator] ott$ token nao encontrado. Corpo: {body_text[:300]}")
             return None, None
 
-        logger.info(f"[Creator] ✅ CONTA CRIADA: {email} | Token: {token[:35]}...")
+        logger.info(f"[Creator] CONTA CRIADA: {email} | Token: {token[:35]}...")
         return email, token
 
     except Exception as e:
