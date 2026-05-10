@@ -15,7 +15,8 @@ import { getEffectiveProxy } from './dashboard/proxy-config.js';
 import { getTierModels } from './models.js';
 
 import { join } from 'path';
-const ACCOUNTS_FILE = join(process.cwd(), 'accounts.json');
+const DATA_DIR = process.env.DATA_DIR || process.cwd();
+const ACCOUNTS_FILE = join(DATA_DIR, 'accounts.json');
 
 // ─── Account pool ──────────────────────────────────────────
 
