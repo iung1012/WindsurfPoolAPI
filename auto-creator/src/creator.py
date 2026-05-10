@@ -152,7 +152,7 @@ async def create_one_account(
 
         # ── 5. Poll LuckMail for code (while browser waits) ──────────────
         logger.info(f"[Creator] Waiting for code from LuckMail (order {order_no})...")
-        code = await luckmail.poll_code(order_no, max_attempts=30, interval=4)
+        code = await luckmail.poll_code(order_no, max_attempts=60, interval=5)
         if not code:
             logger.error(f"[Creator] No verification code received for {email}")
             return None, None
